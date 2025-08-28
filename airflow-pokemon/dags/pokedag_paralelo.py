@@ -205,11 +205,119 @@ def merge_and_transform_data(**kwargs):
             "special-attack": stats.get("special-attack"),
             "special-defense": stats.get("special-defense"),
             "speed": stats.get("speed"),
+            "grupo": "GRUPO 14"
+
         })
     df = pd.DataFrame(tidy_records)
-    os.makedirs(os.path.dirname(MERGED_DATA_PATH), exist_ok=True)
-    df.to_csv(MERGED_DATA_PATH, index=False)
-    print(f"[INFO] CSV guardado en: {MERGED_DATA_PATH}")
+
+    # punto 2 
+    # Crear carpeta output, a menos que exista
+    output_dir = "output"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Obtener ds, q es la fecha de ejecución, del contexto
+    ds = kwargs['ds']
+
+    # Definir ruta final con fecha
+    output_path = f"{output_dir}/final_{ds}.csv"
+
+    # Guardar CSV
+    df.to_csv(output_path, index=False)
+    print(f"[INFO] CSV guardado en: {output_path}")
+
+def exportar_logs_reales_zip(**kwargs):
+    import zipfile
+
+    # Nombre del DAG en ejecución
+    dag_id = kwargs['dag'].dag_id
+    ds = kwargs['ds']
+
+    # Carpeta de logs (donde Airflow guarda los logs de cada task)
+    logs_dir = f"/usr/local/airflow/logs/{dag_id}"
+
+    # Crear carpeta de salida si no existe
+    output_dir = "output"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Nombre final del archivo ZIP
+    zip_path = f"{output_dir}/logs_{ds}.zip"
+
+    # Crear archivo ZIP
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(logs_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, logs_dir)  # ruta relativa dentro del ZIP
+                zipf.write(file_path, arcname)
+
+    print(f"[INFO] Logs comprimidos en: {zip_path}")
+    
+def enviar_correo_manual(**kwargs):
+    import smtplib, ssl, mimetypes
+    from email.message import EmailMessage
+
+    ds = kwargs["ds"]
+    GRUPO = "GRUPO 14"
+
+    output_dir = "output"
+    csv_path = f"{output_dir}/final_{ds}.csv"
+    zip_path = f"{output_dir}/logs_{ds}.zip"
+
+    # Validaciones básicas
+    for path in (csv_path, zip_path):
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"No existe el archivo requerido: {path}")
+
+    # Credenciales y servidor SMTP (usa Gmail por defecto)
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_pass = os.environ.get("SMTP_PASSWORD")
+    smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+
+    if not smtp_user or not smtp_pass:
+        raise RuntimeError("Faltan SMTP_USER o SMTP_PASSWORD en variables de entorno.")
+
+    # Construir el email
+    msg = EmailMessage()
+    msg["Subject"] = f"Entrega {GRUPO} - {ds}"
+    msg["From"] = smtp_user
+    msg["To"] = "tomycolombo2009@hotmail.com"
+
+    cuerpo = (
+        f"Hola,\n\n"
+        f"Adjuntamos la entrega del {GRUPO} correspondiente a la ejecución {ds}.\n\n"
+        f"Incluye:\n"
+        f"- CSV final: final_{ds}.csv\n"
+        f"- ZIP de logs: logs_{ds}.zip\n\n"
+        f"Saludos,\n{GRUPO}\n"
+    )
+    msg.set_content(cuerpo)
+
+    # Adjuntar archivos
+    for file_path in (csv_path, zip_path):
+        ctype = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+        maintype, subtype = ctype.split("/", 1)
+        with open(file_path, "rb") as f:
+            msg.add_attachment(
+                f.read(),
+                maintype=maintype,
+                subtype=subtype,
+                filename=os.path.basename(file_path),
+            )
+
+    # Enviar
+    context = ssl.create_default_context()
+    with smtplib.SMTP(smtp_host, smtp_port) as server:
+        server.starttls(context=context)
+        server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
+
+    print(f"[INFO] Email enviado con adjuntos a cienciadedatos.frm.utn@gmail.com (ds={ds}).")
+
+
+
+
+
 
 # DAG
 with DAG(
@@ -246,4 +354,16 @@ with DAG(
         python_callable=merge_and_transform_data,
     )
 
-    fetch_pokemon_list >> [download_a, download_b] >> merge_transform
+
+    export_logs = PythonOperator(
+            task_id='exportar_logs_reales_zip',
+            python_callable=exportar_logs_reales_zip,
+        )
+
+    enviar_mail = PythonOperator(
+    task_id="enviar_correo_manual",
+    python_callable=enviar_correo_manual,
+    )
+
+# cadena final
+[download_a, download_b] >> merge_transform >> export_logs >> enviar_mail
